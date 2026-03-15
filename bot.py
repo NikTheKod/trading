@@ -1,5 +1,8 @@
+#!/usr/bin/env python3
 import asyncio
 import logging
+import sys
+import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -7,241 +10,328 @@ from aiogram.enums import ParseMode
 from datetime import datetime
 import json
 
-from config import Config
-from database import Database
-from ai_analyzer import GiftAnalyzer
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
+# Простая конфигурация без сложных зависимостей для начала
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+APP_URL = os.getenv("APP_URL", "https://your-app.railway.app")
 
-class GiftTraderBot:
-    def __init__(self):
-        self.config = Config()
-        self.bot = Bot(token=self.config.BOT_TOKEN)
-        self.dp = Dispatcher()
-        self.db = Database(self.config.DATABASE_URL)
-        self.analyzer = GiftAnalyzer(self.config.OPENAI_API_KEY)
-        
-        # Регистрируем хендлеры
-        self.setup_handlers()
-        
-    def setup_handlers(self):
-        @self.dp.message(Command("start"))
-        async def cmd_start(message: Message):
-            user = message.from_user
-            await self.db.add_user(
-                telegram_id=user.id,
-                username=user.username
-            )
-            
-            # Создаем клавиатуру с WebApp
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🚀 Открыть биржу",
-                        web_app=WebAppInfo(url=f"{self.config.APP_URL}/app")
-                    )],
-                    [InlineKeyboardButton(
-                        text="🤖 AI Анализ",
-                        callback_data="ai_analysis"
-                    )],
-                    [InlineKeyboardButton(
-                        text="📊 Моя статистика",
-                        callback_data="stats"
-                    )]
-                ]
-            )
-            
-            await message.answer(
-                f"👋 Привет, {user.first_name}!\n\n"
-                "🎁 Добро пожаловать в Glass Trade — умную биржу подарков Telegram.\n\n"
-                "📱 Нажми кнопку ниже, чтобы открыть торговый терминал.\n"
-                "🤖 ИИ поможет найти самые выгодные сделки!",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-        
-        @self.dp.callback_query(lambda c: c.data == "ai_analysis")
-        async def ai_analysis(callback: CallbackQuery):
-            await callback.answer("🤖 ИИ анализирует рынок...")
-            
-            # Получаем данные пользователя
-            user = await self.db.get_user(callback.from_user.id)
-            user_gifts = await self.db.get_user_gifts(user.id)
-            
-            # Получаем рыночные данные (заглушка)
-            market_data = await self.db.get_active_offers()
-            
-            # ИИ анализирует
-            recommendations = await self.analyzer.analyze_market_trends(market_data)
-            
-            if not recommendations:
-                await callback.message.edit_text(
-                    "😕 Пока нет данных для анализа. Попробуй позже.",
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[[
-                            InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")
-                        ]]
-                    )
-                )
-                return
-            
-            # Формируем ответ
-            text = "🤖 <b>AI Анализ рынка</b>\n\n"
-            text += "📈 <b>Топ выгодных предложений:</b>\n\n"
-            
-            for i, rec in enumerate(recommendations[:5], 1):
-                text += f"{i}. {rec.get('gift_name')}\n"
-                text += f"   💰 Купить: {rec.get('buy_price')} ⭐\n"
-                text += f"   💎 Продать: {rec.get('predicted_sell_price')} ⭐\n"
-                text += f"   📊 Прибыль: +{rec.get('profit_percent')}%\n"
-                text += f"   🤔 {rec.get('reasoning')}\n\n"
-            
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить анализ", callback_data="ai_analysis")],
-                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-                ]
-            )
-            
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        
-        @self.dp.callback_query(lambda c: c.data == "stats")
-        async def show_stats(callback: CallbackQuery):
-            user = await self.db.get_user(callback.from_user.id)
-            gifts = await self.db.get_user_gifts(user.id)
-            transactions = await self.db.get_user_transactions(user.id)
-            
-            total_spent = sum(t.amount for t in transactions if t.type == 'buy')
-            total_earned = sum(t.amount for t in transactions if t.type == 'sell')
-            profit = total_earned - total_spent
-            
-            text = f"📊 <b>Ваша статистика</b>\n\n"
-            text += f"👤 Пользователь: @{user.username}\n"
-            text += f"💎 Баланс звёзд: {user.stars_balance} ⭐\n"
-            text += f"🎁 Подарков: {len(gifts)}\n"
-            text += f"💰 Всего потрачено: {total_spent} ⭐\n"
-            text += f"💵 Всего заработано: {total_earned} ⭐\n"
-            text += f"📈 Чистая прибыль: {profit} ⭐\n"
-            
-            if profit > 0:
-                text += f"📊 ROI: +{round(profit/total_spent*100 if total_spent else 0)}%\n"
-            
-            keyboard = InlineKeyboardMarkup(
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN не установлен!")
+    sys.exit(1)
+
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Временное хранилище (потом заменим на БД)
+users = {}
+gifts = {}
+market_offers = [
+    {"id": 1, "name": "Наушники", "price": 890, "profit": 15, "icon": "🎧"},
+    {"id": 2, "name": "Камера Insta", "price": 3200, "profit": 22, "icon": "📸"},
+    {"id": 3, "name": "Мишка Ltd", "price": 2750, "profit": 9, "icon": "🧸"},
+    {"id": 4, "name": "Watch Pro", "price": 6100, "profit": 31, "icon": "⌚"},
+    {"id": 5, "name": "Игровая приставка", "price": 15300, "profit": 18, "icon": "🎮"}
+]
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user = message.from_user
+    users[user.id] = {
+        "id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "stars": 10000,  # Стартовый баланс
+        "gifts": []
+    }
+    
+    # Добавляем тестовые подарки
+    users[user.id]["gifts"] = [
+        {"id": 1, "name": "Плюшевый мишка", "price": 1200, "icon": "🧸"},
+        {"id": 2, "name": "Элитные часы", "price": 4900, "icon": "⌚"},
+        {"id": 3, "name": "Смартфон X", "price": 8200, "icon": "📱"}
+    ]
+    
+    logger.info(f"Новый пользователь: {user.id} - {user.username}")
+    
+    # Клавиатура с WebApp
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚀 Открыть биржу",
+                web_app=WebAppInfo(url=f"{APP_URL}")
+            )],
+            [InlineKeyboardButton(
+                text="📊 Мои подарки",
+                callback_data="my_gifts"
+            )],
+            [InlineKeyboardButton(
+                text="💰 Баланс",
+                callback_data="balance"
+            )]
+        ]
+    )
+    
+    await message.answer(
+        f"👋 Привет, {user.first_name}!\n\n"
+        f"🎁 Добро пожаловать в Glass Trade!\n"
+        f"💎 Твой баланс: {users[user.id]['stars']} ⭐\n\n"
+        f"📱 Нажми кнопку ниже, чтобы открыть торговый терминал.",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(lambda c: c.data == "my_gifts")
+async def show_my_gifts(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users:
+        await callback.answer("Сначала нажми /start")
+        return
+    
+    user_gifts = users[user_id]["gifts"]
+    
+    if not user_gifts:
+        await callback.message.edit_text(
+            "🎁 У тебя пока нет подарков.\n"
+            "Зайди в биржу и купи что-нибудь!",
+            reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")
                 ]]
             )
-            
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        
-        @self.dp.callback_query(lambda c: c.data == "back_to_menu")
-        async def back_to_menu(callback: CallbackQuery):
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🚀 Открыть биржу",
-                        web_app=WebAppInfo(url=f"{self.config.APP_URL}/app")
-                    )],
-                    [InlineKeyboardButton(
-                        text="🤖 AI Анализ",
-                        callback_data="ai_analysis"
-                    )],
-                    [InlineKeyboardButton(
-                        text="📊 Моя статистика",
-                        callback_data="stats"
-                    )]
-                ]
-            )
-            
-            await callback.message.edit_text(
-                "🎁 <b>Glass Trade</b> — умная биржа подарков\n\n"
-                "Выбери действие:",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-        
-        # WebApp Data Handler
-        @self.dp.message(lambda message: message.web_app_data)
-        async def web_app_handler(message: Message):
-            data = json.loads(message.web_app_data.data)
-            action = data.get('action')
-            
-            if action == 'sell_gift':
-                gift_id = data.get('gift_id')
-                # Обрабатываем продажу
-                result = await self.process_sale(message.from_user.id, gift_id)
-                await message.answer(result)
-                
-            elif action == 'buy_gift':
-                offer_id = data.get('offer_id')
-                # Обрабатываем покупку
-                result = await self.process_purchase(message.from_user.id, offer_id)
-                await message.answer(result)
-                
-            elif action == 'sync_gifts':
-                # Синхронизация подарков с аккаунтом Telegram
-                await self.sync_user_gifts(message.from_user.id)
-                await message.answer("✅ Подарки синхронизированы!")
-    
-    async def process_sale(self, user_id: int, gift_id: str):
-        # Здесь логика продажи через Telegram API
-        user = await self.db.get_user(user_id)
-        gift = await self.db.get_gift(gift_id)
-        
-        if not gift or gift.user_id != user.id:
-            return "❌ Подарок не найден"
-        
-        # TODO: Реальная продажа через Telegram API
-        # Сейчас просто симуляция
-        
-        user.stars_balance += gift.price
-        gift.is_sold = True
-        gift.sold_at = datetime.utcnow()
-        
-        await self.db.commit()
-        
-        return f"✅ Подарок {gift.name} продан за {gift.price} ⭐"
-    
-    async def process_purchase(self, user_id: int, offer_id: str):
-        # Здесь логика покупки
-        user = await self.db.get_user(user_id)
-        offer = await self.db.get_offer(offer_id)
-        
-        if not offer:
-            return "❌ Предложение не найдено"
-        
-        if user.stars_balance < offer.buy_price:
-            return "❌ Недостаточно звёзд"
-        
-        # TODO: Реальная покупка через Telegram API
-        
-        user.stars_balance -= offer.buy_price
-        
-        # Создаём новый подарок
-        new_gift = Gift(
-            user_id=user.id,
-            gift_id=f"gift_{datetime.utcnow().timestamp()}",
-            name=offer.gift_name,
-            price=offer.predicted_sell_price,
-            icon=offer.gift_icon
         )
-        
-        await self.db.add_gift(new_gift)
-        
-        return f"✅ Подарок {offer.gift_name} куплен за {offer.buy_price} ⭐"
+        return
     
-    async def sync_user_gifts(self, user_id: int):
-        """
-        Синхронизация подарков с аккаунтом Telegram
-        """
-        # TODO: Реальная синхронизация через Telegram API
-        # Сейчас просто заглушка
-        pass
+    text = "🎁 <b>Твои подарки:</b>\n\n"
+    for gift in user_gifts:
+        text += f"{gift['icon']} {gift['name']} — {gift['price']} ⭐\n"
     
-    async def run(self):
-        await self.db.init()
-        await self.dp.start_polling(self.bot)
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")
+            ]]
+        ),
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "balance")
+async def show_balance(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users:
+        await callback.answer("Сначала нажми /start")
+        return
+    
+    user = users[user_id]
+    
+    text = f"💰 <b>Твой баланс</b>\n\n"
+    text += f"💎 Звёзды: {user['stars']} ⭐\n"
+    text += f"🎁 Подарков: {len(user['gifts'])}\n"
+    
+    total_value = sum(g['price'] for g in user['gifts'])
+    text += f"📦 Стоимость подарков: {total_value} ⭐\n"
+    text += f"💵 Общий капитал: {user['stars'] + total_value} ⭐"
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")
+            ]]
+        ),
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(lambda c: c.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in users:
+        await callback.answer("Сначала нажми /start")
+        return
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🚀 Открыть биржу",
+                web_app=WebAppInfo(url=f"{APP_URL}")
+            )],
+            [InlineKeyboardButton(
+                text="📊 Мои подарки",
+                callback_data="my_gifts"
+            )],
+            [InlineKeyboardButton(
+                text="💰 Баланс",
+                callback_data="balance"
+            )]
+        ]
+    )
+    
+    await callback.message.edit_text(
+        f"👋 С возвращением!\n\n"
+        f"💎 Твой баланс: {users[user_id]['stars']} ⭐\n"
+        f"🎁 Подарков: {len(users[user_id]['gifts'])}\n\n"
+        f"Выбери действие:",
+        reply_markup=keyboard
+    )
+
+@dp.message(lambda message: message.web_app_data)
+async def web_app_handler(message: Message):
+    try:
+        data = json.loads(message.web_app_data.data)
+        action = data.get('action')
+        user_id = message.from_user.id
+        
+        logger.info(f"WebApp data from {user_id}: {data}")
+        
+        if user_id not in users:
+            users[user_id] = {
+                "id": user_id,
+                "username": message.from_user.username,
+                "first_name": message.from_user.first_name,
+                "stars": 10000,
+                "gifts": []
+            }
+        
+        if action == 'sell_gift':
+            gift_id = data.get('gift_id')
+            # Находим подарок
+            gift = next((g for g in users[user_id]['gifts'] if g['id'] == gift_id), None)
+            
+            if gift:
+                users[user_id]['stars'] += gift['price']
+                users[user_id]['gifts'] = [g for g in users[user_id]['gifts'] if g['id'] != gift_id]
+                await message.answer(f"✅ Подарок {gift['name']} продан за {gift['price']} ⭐")
+            else:
+                await message.answer("❌ Подарок не найден")
+                
+        elif action == 'buy_gift':
+            offer_id = data.get('offer_id')
+            offer = next((o for o in market_offers if o['id'] == offer_id), None)
+            
+            if offer:
+                if users[user_id]['stars'] >= offer['price']:
+                    users[user_id]['stars'] -= offer['price']
+                    new_gift = {
+                        "id": len(users[user_id]['gifts']) + 1,
+                        "name": offer['name'],
+                        "price": offer['price'] + (offer['price'] * offer['profit'] // 100),
+                        "icon": offer['icon']
+                    }
+                    users[user_id]['gifts'].append(new_gift)
+                    await message.answer(f"✅ Подарок {offer['name']} куплен за {offer['price']} ⭐")
+                else:
+                    await message.answer(f"❌ Недостаточно звёзд! Нужно {offer['price']} ⭐")
+            else:
+                await message.answer("❌ Предложение не найдено")
+                
+        elif action == 'get_data':
+            # Отправляем данные пользователя в мини-апп
+            user_data = {
+                "stars": users[user_id]['stars'],
+                "gifts": users[user_id]['gifts'],
+                "offers": market_offers
+            }
+            await message.answer(json.dumps(user_data))
+            
+    except Exception as e:
+        logger.error(f"Error in web_app_handler: {e}")
+        await message.answer("❌ Произошла ошибка")
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = """
+<b>🤖 Glass Trade — Помощь</b>
+
+<b>Команды:</b>
+/start - Запустить бота
+/help - Показать это сообщение
+/balance - Проверить баланс
+/gifts - Мои подарки
+/market - Рыночные предложения
+
+<b>Как торговать:</b>
+1️⃣ Нажми "Открыть биржу"
+2️⃣ Выбирай подарки для покупки/продажи
+3️⃣ Следи за прибылью
+
+<b>🎯 Советы:</b>
+• Покупай дешево, продавай дорого
+• Следи за трендами
+• Используй анализ рынка
+    """
+    
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("balance"))
+async def cmd_balance(message: Message):
+    user_id = message.from_user.id
+    if user_id not in users:
+        await message.answer("Сначала нажми /start")
+        return
+    
+    user = users[user_id]
+    await message.answer(
+        f"💰 <b>Твой баланс</b>\n\n"
+        f"💎 Звёзды: {user['stars']} ⭐\n"
+        f"🎁 Подарков: {len(user['gifts'])}",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(Command("gifts"))
+async def cmd_gifts(message: Message):
+    user_id = message.from_user.id
+    if user_id not in users:
+        await message.answer("Сначала нажми /start")
+        return
+    
+    gifts_list = users[user_id]['gifts']
+    if not gifts_list:
+        await message.answer("🎁 У тебя пока нет подарков")
+        return
+    
+    text = "🎁 <b>Твои подарки:</b>\n\n"
+    for gift in gifts_list:
+        text += f"{gift['icon']} {gift['name']} — {gift['price']} ⭐\n"
+    
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("market"))
+async def cmd_market(message: Message):
+    text = "🏪 <b>Рыночные предложения:</b>\n\n"
+    for offer in market_offers[:5]:
+        text += f"{offer['icon']} {offer['name']}\n"
+        text += f"   💰 Цена: {offer['price']} ⭐\n"
+        text += f"   📈 Профит: +{offer['profit']}%\n\n"
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🚀 Открыть биржу",
+                web_app=WebAppInfo(url=f"{APP_URL}")
+            )
+        ]]
+    )
+    
+    await message.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+async def main():
+    logger.info("Starting bot...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    bot = GiftTraderBot()
-    asyncio.run(bot.run())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
